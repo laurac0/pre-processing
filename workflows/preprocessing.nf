@@ -47,6 +47,7 @@ include { INPUT_CHECK } from '../subworkflows/local/input_check'
 // MODULE: Installed directly from nf-core/modules
 //
 include { FASTQC                      } from '../modules/nf-core/fastqc/main'
+include { FASTP                       } from '../modules/nf-core/fastp/main'
 include { MULTIQC                     } from '../modules/nf-core/multiqc/main'
 include { CUSTOM_DUMPSOFTWAREVERSIONS } from '../modules/nf-core/custom/dumpsoftwareversions/main'
 
@@ -62,6 +63,9 @@ def multiqc_report = []
 workflow PREPROCESSING {
 
     ch_versions = Channel.empty()
+    
+    // To gather all QC reports for MultiQC
+    ch_reports  = Channel.empty()
 
     //
     // SUBWORKFLOW: Read in samplesheet, validate and stage input files
@@ -70,9 +74,9 @@ workflow PREPROCESSING {
         file(params.input)
     )
     ch_versions = ch_versions.mix(INPUT_CHECK.out.versions)
-    // TODO: OPTIONAL, you can use nf-validation plugin to create an input channel from the samplesheet with Channel.fromSamplesheet("input")
-    // See the documentation https://nextflow-io.github.io/nf-validation/samplesheets/fromSamplesheet/
-    // ! There is currently no tooling to help you write a sample sheet schema
+
+    // Assign fastq
+    // input_fastq = INPUT_CHECK.out.reads
 
     //
     // MODULE: Run FastQC
@@ -80,8 +84,43 @@ workflow PREPROCESSING {
     FASTQC (
         INPUT_CHECK.out.reads
     )
+    ch_reports = ch_reports.mix(FASTQC.out.zip.collect{ meta, logs -> logs })
     ch_versions = ch_versions.mix(FASTQC.out.versions.first())
 
+    //
+    // MODULE: Run Fastp trimming
+    //
+    // Trimming and/or splitting
+    if (params.trim_fastq || params.split_fastq > 0) {
+        save_trimmed_fail = false
+        save_merged = false
+        FASTP(
+            INPUT_CHECK.out.reads,
+            [],
+            save_trimmed_fail,
+            save_merged
+        )
+
+        ch_reports = ch_reports.mix(FASTP.out.json.collect{ meta, json -> json })
+        ch_reports = ch_reports.mix(FASTP.out.html.collect{ meta, html -> html })
+
+        if (params.split_fastq) {
+            reads_for_alignment = FASTP.out.reads.map{ meta, reads ->
+                read_files = reads.sort(false) { a,b -> a.getName().tokenize('.')[0] <=> b.getName().tokenize('.')[0] }.collate(2)
+                [ meta + [ size:read_files.size() ], read_files ]
+            }.transpose()
+        } else reads_for_alignment = FASTP.out.reads
+
+        ch_versions = ch_versions.mix(FASTP.out.versions)
+
+    } 
+    else {
+       reads_for_alignment = INPUT_CHECK.out.reads
+    }
+
+    //
+    // MODULE: Pipeline reporting
+    //
     CUSTOM_DUMPSOFTWAREVERSIONS (
         ch_versions.unique().collectFile(name: 'collated_versions.yml')
     )
@@ -100,6 +139,7 @@ workflow PREPROCESSING {
     ch_multiqc_files = ch_multiqc_files.mix(ch_methods_description.collectFile(name: 'methods_description_mqc.yaml'))
     ch_multiqc_files = ch_multiqc_files.mix(CUSTOM_DUMPSOFTWAREVERSIONS.out.mqc_yml.collect())
     ch_multiqc_files = ch_multiqc_files.mix(FASTQC.out.zip.collect{it[1]}.ifEmpty([]))
+    ch_multiqc_files = ch_multiqc_files.mix(ch_reports.collect().ifEmpty([]))
 
     MULTIQC (
         ch_multiqc_files.collect(),
