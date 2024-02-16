@@ -75,9 +75,6 @@ workflow PREPROCESSING {
     )
     ch_versions = ch_versions.mix(INPUT_CHECK.out.versions)
 
-    // Assign fastq
-    // input_fastq = INPUT_CHECK.out.reads
-
     //
     // MODULE: Run FastQC
     //
